@@ -79,14 +79,17 @@ if (Test-Path $stagingDir) {
 }
 New-Item -ItemType Directory -Force -Path $stagingDir | Out-Null
 
-$executable = Join-Path $repoRoot "SoftwareInstaller.exe"
+# PyInstaller --onefile 默认输出到 dist\ 目录
+$executable = Join-Path $repoRoot "dist\SoftwareInstaller.exe"
 if (-not (Test-Path $executable)) {
     Write-Host "[错误] 找不到 $executable,请先运行打包步骤或删除 -SkipExeBuild。" -ForegroundColor Red
     exit 1
 }
 
+# exe 单独处理(在 dist\ 下),其他文件在项目根
+Copy-Item -LiteralPath $executable -Destination $stagingDir -Force
+
 $launchFiles = @(
-    "SoftwareInstaller.exe",
     "Start-SoftwareInstaller.bat",
     "启动安装包管理器.bat",
     "README.md",
