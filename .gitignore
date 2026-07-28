@@ -12,5 +12,7 @@ ChangeWindowsInstallTime.bat
 # Logs and temporary files
 *.log
 *.tmp
+dist/
+release/
 Thumbs.db
 Desktop.ini

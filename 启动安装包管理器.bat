@@ -1,4 +1,4 @@
 @echo off
 setlocal
 cd /d "%~dp0"
-powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0InstallerManager.ps1"
+call "%~dp0Start-SoftwareInstaller.bat"

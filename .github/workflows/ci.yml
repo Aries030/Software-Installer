@@ -14,16 +14,19 @@ jobs:
       - name: Validate PowerShell syntax
         shell: pwsh
         run: |
-          $tokens = $null
-          $errors = $null
-          [System.Management.Automation.Language.Parser]::ParseFile(
-            (Resolve-Path .\InstallerManager.ps1),
-            [ref]$tokens,
-            [ref]$errors
-          ) | Out-Null
-          if ($errors.Count) {
-            $errors | ForEach-Object { $_.Message }
-            exit 1
+          foreach ($script in @("InstallerManager.ps1", "Build-Release.ps1")) {
+            $tokens = $null
+            $errors = $null
+            [System.Management.Automation.Language.Parser]::ParseFile(
+              (Resolve-Path $script),
+              [ref]$tokens,
+              [ref]$errors
+            ) | Out-Null
+            if ($errors.Count) {
+              Write-Host "Syntax errors in $script"
+              $errors | ForEach-Object { $_.Message }
+              exit 1
+            }
           }
 
       - name: Compile Python files when available

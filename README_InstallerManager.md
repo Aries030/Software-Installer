@@ -1,50 +1,9 @@
-# 安装包筛选与批量安装工具
+# Portable Usage
 
-这是一个放在安装包目录旁边使用的小工具。它会扫描工具所在目录及其子目录里的常见安装包，让你筛选、勾选，然后按顺序安装。
+1. Download the latest `Software-Installer-<version>.zip` from GitHub Releases.
+2. Extract the zip.
+3. Put installer packages in the extracted folder or its subfolders.
+4. Run `Start-SoftwareInstaller.bat`.
+5. Select packages and click `Deploy selected`.
 
-## 启动
-
-在 Windows 上双击：
-
-```bat
-启动安装包管理器.bat
-```
-
-如果安装包需要管理员权限，建议右键这个 bat 文件，选择“以管理员身份运行”。
-
-## 支持的文件
-
-默认扫描这些扩展名：
-
-```text
-.exe .msi .msu .msp .bat .cmd
-```
-
-会跳过 `.git`、虚拟环境、`node_modules` 和工具自身源码目录。
-
-## 安装流程
-
-1. 点击“重新扫描”找到当前目录及子目录里的安装包。
-2. 用“筛选”输入框按文件名、扩展名或所在文件夹过滤。
-3. 双击列表行或按空格勾选要安装的项目，也可以用“全选”。
-4. 选中某一行后，可以在右侧修改“安装参数”。
-5. 点击“确定安装已勾选”，工具会按列表顺序逐个启动并等待安装结束。
-
-如果某个安装器没有真正支持静默参数，弹出了人工确认窗口，工具会等待这个安装进程退出。你手动点完后，它才会继续下一项。
-
-## 默认静默参数
-
-- `.msi`：`msiexec /i 文件 /qn /norestart`
-- `.msp`：`msiexec /p 文件 /qn /norestart`
-- `.msu`：`wusa 文件 /quiet /norestart`
-- `.exe`：`文件 /S`
-- `.bat` / `.cmd`：直接通过 `cmd /c` 执行
-
-不同厂商的 `.exe` 静默参数不完全一致。如果 `/S` 不适用，可以选中该安装包，在右侧把参数改成例如：
-
-```text
-/VERYSILENT /SUPPRESSMSGBOXES /NORESTART /SP-
-```
-
-或厂商文档要求的其它参数。
-
+If packages require elevation, either run the batch file as administrator or use `Run admin` in the app.

@@ -1,20 +1,25 @@
-# Windows Installer Package Manager
+# Software Installer
 
-This repository contains a Windows GUI for scanning installer packages in the app folder, selecting packages, and installing them in order.
+Software Installer is a portable Windows desktop tool for enterprise-style package deployment. It scans the application folder and its subfolders for installer packages, lets you select what to deploy, then launches each installer in sequence.
 
-Use this tool when you have a folder full of software installers and want to choose which ones to install.
+The interface is designed for an IT operations workflow: dark surfaces, blue action emphasis, package counters, deployment details, command preview, and an activity log.
 
-### Start On Windows
+## Download
 
-Double-click:
+Use the latest package from GitHub Releases:
 
-```bat
-启动安装包管理器.bat
-```
+[Download Releases](https://github.com/Aries030/Software-Installer/releases)
 
-If the selected installers require administrator privileges, right-click the batch file and choose "Run as administrator", or click `Run admin` in the app.
+The normal usage flow is:
 
-### Supported Installer Files
+1. Download `Software-Installer-<version>.zip`.
+2. Extract the zip to the folder that contains your installer packages, or copy installer packages into the extracted folder.
+3. Open `Start-SoftwareInstaller.bat`.
+4. Select packages and click `Deploy selected`.
+
+No installation is required.
+
+## Supported Installer Files
 
 The scanner searches the tool folder and its subfolders for:
 
@@ -22,19 +27,13 @@ The scanner searches the tool folder and its subfolders for:
 .exe .msi .msu .msp .bat .cmd
 ```
 
-It ignores local development folders and generated bundles such as `.git`, virtual environments, `node_modules`, and `KylinDiskHider_USB`.
+The app ignores development and release folders such as `.git`, `.github`, `dist`, virtual environments, `node_modules`, and the application launcher files.
 
-### Install Flow
+## Deployment Behavior
 
-1. Click `Rescan` to find installer packages.
-2. Filter by file name, extension, or folder.
-3. Select the packages to install.
-4. Optionally edit the arguments for the selected installer.
-5. Click `Install selected`.
+Software Installer starts each selected package and waits for that process to exit before continuing. If an installer needs manual interaction, the queue pauses naturally until the user finishes that installer.
 
-The app starts each installer and waits for it to exit before continuing. If an installer needs manual clicks, the workflow naturally pauses until that installer process finishes.
-
-### Default Silent Arguments
+Default silent arguments:
 
 - `.msi`: `msiexec /i <file> /qn /norestart`
 - `.msp`: `msiexec /p <file> /qn /norestart`
@@ -48,12 +47,29 @@ Different `.exe` installers use different silent flags. For example, Inno Setup 
 /VERYSILENT /SUPPRESSMSGBOXES /NORESTART /SP-
 ```
 
-## Python GUI Variant
+Select a package and edit `INSTALL ARGUMENTS` when a vendor requires different silent parameters.
 
-There is also a Python/Tkinter implementation:
+## Build A Portable Zip
+
+Run:
 
 ```powershell
-python run_installer_app.py
+.\Build-Release.ps1 -Version 1.1.0
 ```
 
-The PowerShell version is the recommended default because it works on Windows without installing Python.
+The zip is written to:
+
+```text
+dist\Software-Installer-1.1.0.zip
+```
+
+## GitHub Release Process
+
+Push a version tag to trigger the Release workflow:
+
+```powershell
+git tag v1.1.0
+git push origin v1.1.0
+```
+
+GitHub Actions will build the portable zip and publish it to the repository Releases page.
