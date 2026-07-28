@@ -1,11 +1,6 @@
 # Windows Installer Package Manager
 
-This repository contains two small utilities:
-
-- `InstallerManager.ps1`: a Windows GUI for scanning installer packages in the app folder, selecting packages, and installing them in order.
-- `disk_hider`: a Kylin Linux terminal utility for hiding selected disk partitions from desktop file managers.
-
-## Installer Package Manager
+This repository contains a Windows GUI for scanning installer packages in the app folder, selecting packages, and installing them in order.
 
 Use this tool when you have a folder full of software installers and want to choose which ones to install.
 
@@ -62,48 +57,3 @@ python run_installer_app.py
 ```
 
 The PowerShell version is the recommended default because it works on Windows without installing Python.
-
-## Kylin Disk Hider
-
-A small terminal utility for Kylin Linux. It hides selected disk partitions from udisks2-aware desktop tools by writing udev rules.
-
-Run on Kylin:
-
-```bash
-sudo python3 main.py
-```
-
-The tool lists partitions in the terminal. Type numbers to add them to the hidden list, for example:
-
-```text
-1 3
-```
-
-Running the tool again and typing `2` keeps the already hidden partitions and adds partition 2. To unhide partitions, type `u 2 3`. To clear all hidden partitions, type `n`.
-
-If you want a batch-file-like launcher on Kylin, run:
-
-```bash
-chmod +x run_admin.sh
-./run_admin.sh
-```
-
-The tool reads partitions from:
-
-```bash
-lsblk -J -o NAME,PATH,FSTYPE,SIZE,UUID,LABEL,MOUNTPOINT,TYPE
-```
-
-When you apply the selection, it writes:
-
-```text
-/etc/udev/rules.d/99-kylin-disk-hider.rules
-```
-
-Each hidden partition is represented as:
-
-```text
-ENV{ID_FS_UUID}=="<partition-uuid>", ENV{UDISKS_IGNORE}="1", ENV{UDISKS_PRESENTATION_HIDE}="1"
-```
-
-After writing rules, the tool reloads udev and tries to unmount selected non-critical partitions so the file manager stops showing stale mounted entries.
