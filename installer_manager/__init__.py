@@ -1,0 +1,2 @@
+"""Batch installer picker application."""
+

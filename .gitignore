@@ -1,0 +1,16 @@
+__pycache__/
+*.pyc
+.venv/
+.idea/
+.vscode/
+
+# Local machine backups and generated bundles
+*.reg
+KylinDiskHider_USB/
+ChangeWindowsInstallTime.bat
+
+# Logs and temporary files
+*.log
+*.tmp
+Thumbs.db
+Desktop.ini
