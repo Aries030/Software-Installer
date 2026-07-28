@@ -1,18 +1,17 @@
-"""Software Installer - 现代化 GUI (customtkinter)
+"""Software Installer v2.0 — 现代化 GUI (customtkinter)
 
-设计目标:
-  - 暗色主题 + 圆角扁平 + 现代感
-  - 标题栏展示 LOGO
-  - 自定义列表行(勾选 + 文件名 + 类型徽标 + 大小 + 路径)
-  - 实时命令预览
-  - 进度条 + 详细日志
-  - 易用性:快捷键、筛选、自动保存参数、状态反馈
+按照 UI 设计规范 v2.0 实现:
+  - 三栏 + 命令栏布局(左栏统计/类型筛选 · 中栏卡片列表 · 右栏详情)
+  - 卡片式列表项(5 种状态:未选/已选/安装中/已完成/失败)
+  - 空状态引导
+  - 键盘快捷键(Ctrl+A/R/F, Enter, Esc, Space, 双击)
+  - Toast 提示 + 确认对话框
+  - 进度条 + 日志 + 状态栏
 """
 from __future__ import annotations
 
 import os
 import queue
-import sys
 import threading
 import tkinter as tk
 from datetime import datetime
@@ -34,26 +33,49 @@ from installer_manager.core import (
 )
 
 
+# ==================== 常量 ====================
+
 APP_NAME = "Software Installer"
-APP_VERSION = "1.2.0"
+APP_VERSION = "2.0.0"
 APP_TAGLINE = "批量静默部署 · 一键搞定"
 
-# 主题色:与 LOGO 同源的品牌蓝
-COLOR_ACCENT = "#0078D4"
-COLOR_ACCENT_HOVER = "#1F8AE8"
-COLOR_SUCCESS = "#2DD4BF"
-COLOR_WARNING = "#F59E0B"
-COLOR_ERROR = "#F87171"
+# 颜色(暗色主题)
+C_BG_APP = "#0B1220"
+C_BG_SURFACE = "#111827"
+C_BG_RAISED = "#1E293B"
+C_BORDER = "#334155"
+C_BORDER_SOFT = "#1E293B"
+C_TEXT_PRIMARY = "#E2E8F0"
+C_TEXT_TITLE = "#F1F5F9"
+C_TEXT_SECONDARY = "#94A3B8"
+C_TEXT_MUTED = "#64748B"
+C_ACCENT = "#378ADD"
+C_ACCENT_HOVER = "#185FA5"
+C_ACCENT_ACTIVE = "#0C447C"
+C_SUCCESS = "#1D9E75"
+C_WARNING = "#EF9F27"
+C_ERROR = "#E24B4A"
+C_PURPLE = "#7F77DD"
+C_PINK = "#D4537E"
 
 # 类型徽标配色
-EXT_COLORS = {
-    ".exe": ("#1F8AE8", "#0F4F8F"),  # 蓝
-    ".msi": ("#8B5CF6", "#4C2E91"),  # 紫
-    ".msp": ("#8B5CF6", "#4C2E91"),
-    ".msu": ("#EC4899", "#8E2A6A"),  # 粉
-    ".bat": ("#F59E0B", "#7A4F08"),  # 橙
-    ".cmd": ("#F59E0B", "#7A4F08"),
+EXT_COLORS: Dict[str, str] = {
+    ".exe": C_ACCENT,
+    ".msi": C_PURPLE,
+    ".msp": C_PURPLE,
+    ".msu": C_PINK,
+    ".bat": C_WARNING,
+    ".cmd": C_WARNING,
 }
+
+SPINNER_CHARS = "◐◓◑◒"
+
+# 卡片状态
+S_UNSELECTED = "unselected"
+S_SELECTED = "selected"
+S_INSTALLING = "installing"
+S_COMPLETED = "completed"
+S_FAILED = "failed"
 
 
 def _resource_path(rel: str) -> Path:
@@ -64,98 +86,176 @@ def _resource_path(rel: str) -> Path:
     return Path(__file__).resolve().parent.parent / rel
 
 
-class PackageRow(ctk.CTkFrame):
-    """安装包列表中的一行。"""
+import sys  # noqa: E402
 
-    def __init__(
-        self,
-        master,
-        package: InstallerPackage,
-        selected: bool,
-        on_toggle,
-        on_select,
-    ) -> None:
-        super().__init__(master, fg_color="transparent", corner_radius=8, height=42)
+
+# ==================== 卡片组件 ====================
+
+class PackageCard(ctk.CTkFrame):
+    """安装包列表中的一张卡片,支持 5 种状态。"""
+
+    def __init__(self, master, package: InstallerPackage, on_toggle, on_select):
+        super().__init__(master, fg_color=C_BG_SURFACE, corner_radius=10,
+                         border_width=0.5, border_color=C_BORDER, height=52)
         self.package = package
         self.on_toggle = on_toggle
         self.on_select = on_select
-        self._selected = selected
+        self._state = S_UNSELECTED
+        self._spinner_after: Optional[str] = None
 
-        self.grid_columnconfigure(2, weight=1)
         self.grid_propagate(False)
+        self.grid_columnconfigure(2, weight=1)
 
-        # 勾选框
-        self.check_var = tk.BooleanVar(value=selected)
-        self.checkbox = ctk.CTkCheckBox(
-            self, text="", variable=self.check_var, width=24,
-            checkbox_width=20, checkbox_height=20, corner_radius=5,
-            command=self._on_check,
-        )
-        self.checkbox.grid(row=0, column=0, padx=(12, 8), pady=10, sticky="w")
+        # 勾选框 / 状态图标
+        self.check_label = ctk.CTkLabel(self, text="", width=24, anchor="center")
+        self.check_label.grid(row=0, column=0, padx=(10, 6), pady=10)
+        self.check_label.bind("<Button-1>", lambda e: self._on_click())
 
         # 类型徽标
         ext = package.extension
-        fg, _ = EXT_COLORS.get(ext, ("#64748B", "#334155"))
-        self.type_badge = ctk.CTkLabel(
+        badge_color = EXT_COLORS.get(ext, C_TEXT_MUTED)
+        self.badge = ctk.CTkLabel(
             self, text=ext.lstrip(".").upper(),
-            font=ctk.CTkFont(size=11, weight="bold"),
-            fg_color=fg, text_color="#FFFFFF",
-            corner_radius=6, width=54, height=22,
+            font=ctk.CTkFont(size=10, weight="bold"),
+            fg_color=badge_color, text_color="#FFFFFF",
+            corner_radius=5, width=36, height=20,
         )
-        self.type_badge.grid(row=0, column=1, padx=(0, 10), pady=10)
+        self.badge.grid(row=0, column=1, padx=(0, 8), pady=10)
 
-        # 文件名
+        # 文件名 + 子标题
+        name_frame = ctk.CTkFrame(self, fg_color="transparent")
+        name_frame.grid(row=0, column=2, padx=(0, 8), pady=6, sticky="ew")
+        name_frame.grid_columnconfigure(0, weight=1)
+
         self.name_label = ctk.CTkLabel(
-            self, text=package.name, anchor="w",
-            font=ctk.CTkFont(size=13),
+            name_frame, text=package.name, anchor="w",
+            font=ctk.CTkFont(size=12, weight="bold"),
         )
-        self.name_label.grid(row=0, column=2, padx=(0, 10), pady=10, sticky="ew")
+        self.name_label.grid(row=0, column=0, sticky="ew")
 
-        # 大小
-        size_text = f"{package.size_mb:.1f} MB"
-        self.size_label = ctk.CTkLabel(
-            self, text=size_text, anchor="e",
-            font=ctk.CTkFont(size=12), text_color="#94A3B8", width=80,
-        )
-        self.size_label.grid(row=0, column=3, padx=(0, 12), pady=10)
-
-        # 文件夹路径
+        size_text = f"{package.size_mb:.1f} MB" if package.size_mb >= 0.1 else f"{int(package.size_mb * 1024)} KB"
         folder = package.relative_folder
-        folder_display = "." if folder == "." else folder
-        self.folder_label = ctk.CTkLabel(
-            self, text=folder_display, anchor="w",
-            font=ctk.CTkFont(size=11), text_color="#64748B",
+        folder_display = "" if folder == "." else f" · {folder}"
+        self.sub_label = ctk.CTkLabel(
+            name_frame, text=f"{size_text}{folder_display}", anchor="w",
+            font=ctk.CTkFont(size=10), text_color=C_TEXT_MUTED,
         )
-        self.folder_label.grid(row=0, column=4, padx=(0, 12), pady=10, sticky="w")
+        self.sub_label.grid(row=1, column=0, sticky="ew")
 
-        # 整行点击切换勾选
-        for widget in (self, self.type_badge, self.name_label, self.size_label, self.folder_label):
-            widget.bind("<Button-1>", self._on_click)
-            widget.bind("<Double-Button-1>", self._on_click)
-        self.checkbox.bind("<Button-1>", lambda _e: self._on_select_only(), add="+")
+        # 状态标签(右侧)
+        self.status_label = ctk.CTkLabel(
+            self, text="", font=ctk.CTkFont(size=10), width=70, anchor="e",
+        )
+        self.status_label.grid(row=0, column=3, padx=(0, 10), pady=10)
 
-    def _on_click(self, _event=None) -> None:
-        self.on_toggle(self.package)
+        # 整行点击
+        for w in (self, self.badge, self.name_label, self.sub_label, self.status_label):
+            w.bind("<Button-1>", lambda e: self._on_click())
+            w.bind("<Double-Button-1>", lambda e: self._on_click())
 
-    def _on_check(self) -> None:
-        self.on_toggle(self.package)
+        self.set_state(S_UNSELECTED)
 
-    def _on_select_only(self) -> None:
+    def _on_click(self):
         self.on_select(self.package)
+        self.on_toggle(self.package)
 
-    def set_selected(self, selected: bool, highlight: bool = False) -> None:
-        self._selected = selected
-        if self.check_var.get() != selected:
-            self.check_var.set(selected)
-        # 高亮当前选中行
-        if highlight:
-            self.configure(fg_color=("#1F2A3D", "#243044"))
-        else:
-            self.configure(fg_color="transparent")
+    def set_state(self, state: str, result_msg: str = ""):
+        self._state = state
+        # 取消旋转
+        if self._spinner_after and state != S_INSTALLING:
+            self.after_cancel(self._spinner_after)
+            self._spinner_after = None
 
+        if state == S_UNSELECTED:
+            self.configure(fg_color=C_BG_SURFACE, border_color=C_BORDER)
+            self.check_label.configure(text="")
+            self.name_label.configure(text_color=C_TEXT_PRIMARY)
+            self.status_label.configure(text="", text_color=C_TEXT_MUTED)
+        elif state == S_SELECTED:
+            self.configure(fg_color=C_BG_RAISED, border_color=C_ACCENT)
+            self.check_label.configure(text="✓", text_color=C_ACCENT,
+                                       fg_color=C_ACCENT, corner_radius=4)
+            self.check_label.configure(width=24)
+            self._style_check_filled(C_ACCENT)
+            self.name_label.configure(text_color=C_TEXT_TITLE)
+            self.status_label.configure(text="已选择", text_color=C_ACCENT)
+        elif state == S_INSTALLING:
+            self.configure(fg_color=C_BG_RAISED, border_color=C_ACCENT)
+            self._start_spinner()
+            self.name_label.configure(text_color=C_ACCENT)
+            self.status_label.configure(text="安装中…", text_color=C_ACCENT)
+        elif state == S_COMPLETED:
+            self.configure(fg_color=C_BG_SURFACE, border_color=C_SUCCESS)
+            self._style_check_filled(C_SUCCESS, "✓")
+            self.name_label.configure(text_color="#5DCAA5")
+            msg = result_msg or "已完成"
+            self.status_label.configure(text=msg, text_color=C_SUCCESS)
+        elif state == S_FAILED:
+            self.configure(fg_color=C_BG_SURFACE, border_color=C_ERROR)
+            self._style_check_filled(C_ERROR, "✕")
+            self.name_label.configure(text_color="#F09595")
+            msg = result_msg or "失败"
+            self.status_label.configure(text=msg, text_color=C_ERROR)
+
+    def _style_check_filled(self, color: str, symbol: str = "✓"):
+        """用一个小色块+符号模拟填充的勾选框。"""
+        self.check_label.configure(text=symbol, text_color="#FFFFFF",
+                                   fg_color=color)
+
+    def _start_spinner(self):
+        self.check_label.configure(text=SPINNER_CHARS[0], text_color=C_ACCENT,
+                                   fg_color="transparent")
+        self._spin(0)
+
+    def _spin(self, idx: int):
+        self.check_label.configure(text=SPINNER_CHARS[idx % 4])
+        self._spinner_after = self.after(150, lambda: self._spin(idx + 1))
+
+
+# ==================== 空状态组件 ====================
+
+class EmptyState(ctk.CTkFrame):
+    """列表为空时的引导状态。"""
+
+    def __init__(self, master, on_rescan):
+        super().__init__(master, fg_color="transparent", corner_radius=12)
+        self.grid_columnconfigure(0, weight=1)
+        self.grid_rowconfigure(0, weight=1)
+
+        inner = ctk.CTkFrame(self, fg_color=C_BG_SURFACE, corner_radius=12,
+                             border_width=0.5, border_color=C_BORDER)
+        inner.grid(row=0, column=0, padx=20, pady=20)
+        inner.grid_columnconfigure(0, weight=1)
+
+        # 图标(用文字代替 SVG)
+        icon = ctk.CTkLabel(
+            inner, text="📦", font=ctk.CTkFont(size=32)),
+        icon[0].grid(row=0, column=0, padx=40, pady=(32, 8))
+
+        ctk.CTkLabel(
+            inner, text="未发现安装包",
+            font=ctk.CTkFont(size=14, weight="bold"),
+            text_color=C_TEXT_SECONDARY,
+        ).grid(row=1, column=0, padx=40, pady=(0, 4))
+
+        ctk.CTkLabel(
+            inner, text="把 .exe / .msi / .bat 文件放到本目录,\n然后点击「重新扫描」",
+            font=ctk.CTkFont(size=12), text_color=C_TEXT_MUTED,
+            justify="center",
+        ).grid(row=2, column=0, padx=40, pady=(0, 16))
+
+        ctk.CTkButton(
+            inner, text="重新扫描", width=120, height=32,
+            command=on_rescan,
+            fg_color=C_ACCENT, hover_color=C_ACCENT_HOVER,
+            font=ctk.CTkFont(size=12, weight="bold"),
+        ).grid(row=3, column=0, padx=40, pady=(0, 32))
+
+
+# ==================== 主应用 ====================
 
 class InstallerManagerApp(ctk.CTk):
-    def __init__(self) -> None:
+    def __init__(self):
         ctk.set_appearance_mode("dark")
         ctk.set_default_color_theme("blue")
         super().__init__()
@@ -163,26 +263,31 @@ class InstallerManagerApp(ctk.CTk):
         self.title(f"{APP_NAME} {APP_VERSION}")
         self.geometry("1100x720")
         self.minsize(900, 600)
+        self.configure(fg_color=C_BG_APP)
 
         self.root_dir: Path = app_directory()
         self.packages: List[InstallerPackage] = []
         self.filtered: List[InstallerPackage] = []
         self.selected_paths: set[Path] = set()
         self.custom_args: Dict[Path, str] = {}
+        self.card_states: Dict[Path, str] = {}
         self.worker: Optional[threading.Thread] = None
-        self.stop_event: threading.Event = threading.Event()
+        self.stop_event = threading.Event()
         self.events: "queue.Queue[tuple]" = queue.Queue()
-        self._rows: Dict[Path, PackageRow] = {}
+        self._cards: Dict[Path, PackageCard] = {}
         self._current_package: Optional[InstallerPackage] = None
+        self._type_filter: Optional[str] = None  # None = 全部
+        self._is_installing = False
 
         self._set_window_icon()
         self._build_ui()
+        self._bind_shortcuts()
         self.scan()
         self.after(100, self._poll_events)
 
-    # ---------- 资源 / 主题 ----------
+    # ---------- 资源 ----------
 
-    def _set_window_icon(self) -> None:
+    def _set_window_icon(self):
         try:
             ico = _resource_path("assets/logo.ico")
             if ico.exists():
@@ -190,7 +295,7 @@ class InstallerManagerApp(ctk.CTk):
         except Exception:
             pass
 
-    def _logo_image(self, size: int = 32) -> Optional[ctk.CTkImage]:
+    def _logo_image(self, size: int = 28):
         try:
             png = _resource_path("assets/logo.png")
             if not png.exists():
@@ -204,300 +309,359 @@ class InstallerManagerApp(ctk.CTk):
 
     # ---------- 布局 ----------
 
-    def _build_ui(self) -> None:
+    def _build_ui(self):
         self.grid_columnconfigure(0, weight=1)
-        self.grid_rowconfigure(3, weight=1)
+        self.grid_rowconfigure(3, weight=1)  # 主体三栏 flex
 
-        # 标题栏
-        self._build_header(row=0)
+        self._build_header(0)       # 标题栏 56px
+        self._build_command_bar(1)  # 命令栏 48px
+        self._build_filter_bar(2)   # 筛选栏 44px
+        self._build_body(3)         # 三栏主体
+        self._build_progress_bar(4) # 进度栏 56px
+        self._build_log_area(5)     # 日志区
+        self._build_status_bar(6)   # 状态栏 24px
 
-        # 工具栏(目录 + 扫描)
-        self._build_toolbar(row=1)
-
-        # 筛选条
-        self._build_filterbar(row=2)
-
-        # 主体(列表 + 详情)
-        self._build_body(row=3)
-
-        # 底部进度 + 操作
-        self._build_bottom(row=4)
-
-        # 状态栏
-        self._build_statusbar(row=5)
-
-    def _build_header(self, row: int) -> None:
-        header = ctk.CTkFrame(self, fg_color=("#0F172A", "#0B1220"), corner_radius=0, height=64)
+    def _build_header(self, row):
+        header = ctk.CTkFrame(self, fg_color=C_BG_APP, corner_radius=0, height=56)
         header.grid(row=row, column=0, sticky="ew")
         header.grid_propagate(False)
         header.grid_columnconfigure(1, weight=1)
 
-        logo = self._logo_image(36)
+        logo = self._logo_image(28)
         if logo:
             self._logo_ref = logo
-            logo_label = ctk.CTkLabel(header, image=logo, text="")
-            logo_label.grid(row=0, column=0, padx=(20, 12), pady=14, sticky="w")
+            ctk.CTkLabel(header, image=logo, text="").grid(
+                row=0, column=0, padx=(16, 10), pady=14, sticky="w")
 
         title_frame = ctk.CTkFrame(header, fg_color="transparent")
         title_frame.grid(row=0, column=1, sticky="w", pady=10)
-        title = ctk.CTkLabel(
+        ctk.CTkLabel(
             title_frame, text=APP_NAME,
-            font=ctk.CTkFont(size=18, weight="bold"),
-            text_color=("#F1F5F9", "#E2E8F0"),
-        )
-        title.grid(row=0, column=0, sticky="w")
-        subtitle = ctk.CTkLabel(
+            font=ctk.CTkFont(size=16, weight="bold"), text_color=C_TEXT_TITLE,
+        ).grid(row=0, column=0, sticky="w")
+        ctk.CTkLabel(
             title_frame, text=APP_TAGLINE,
-            font=ctk.CTkFont(size=12), text_color="#94A3B8",
-        )
-        subtitle.grid(row=1, column=0, sticky="w")
+            font=ctk.CTkFont(size=11), text_color=C_TEXT_MUTED,
+        ).grid(row=1, column=0, sticky="w")
 
-        version = ctk.CTkLabel(
+        ctk.CTkLabel(
             header, text=f"v{APP_VERSION}",
-            font=ctk.CTkFont(size=12), text_color="#64748B",
-        )
-        version.grid(row=0, column=2, padx=20, sticky="e")
+            font=ctk.CTkFont(size=11), text_color=C_TEXT_MUTED,
+        ).grid(row=0, column=2, padx=16, sticky="e")
 
-    def _build_toolbar(self, row: int) -> None:
-        bar = ctk.CTkFrame(self, fg_color="transparent")
-        bar.grid(row=row, column=0, sticky="ew", padx=16, pady=(12, 6))
+    def _build_command_bar(self, row):
+        bar = ctk.CTkFrame(self, fg_color=C_BG_SURFACE, corner_radius=0)
+        bar.grid(row=row, column=0, sticky="ew")
         bar.grid_columnconfigure(1, weight=1)
 
-        ctk.CTkLabel(bar, text="📂  扫描目录", font=ctk.CTkFont(size=13))\
-            .grid(row=0, column=0, sticky="w")
+        ctk.CTkLabel(bar, text="扫描目录", font=ctk.CTkFont(size=12),
+                     text_color=C_TEXT_SECONDARY).grid(
+            row=0, column=0, padx=(16, 8), pady=12, sticky="w")
 
         self.dir_var = tk.StringVar(value=str(self.root_dir))
         dir_entry = ctk.CTkEntry(
-            bar, textvariable=self.dir_var,
-            placeholder_text="请选择包含安装包的目录",
-            height=36, font=ctk.CTkFont(size=13),
+            bar, textvariable=self.dir_var, height=32,
+            font=ctk.CTkFont(family="Consolas", size=11),
+            fg_color=C_BG_APP, border_color=C_BORDER,
         )
-        dir_entry.grid(row=0, column=1, padx=(10, 10), sticky="ew")
+        dir_entry.grid(row=0, column=1, padx=(0, 8), sticky="ew")
+        dir_entry.configure(state="readonly")
 
         ctk.CTkButton(
-            bar, text="选择目录", width=100, height=36, command=self.choose_directory,
-            fg_color=("#334155", "#1E293B"), hover_color=("#475569", "#334155"),
-            font=ctk.CTkFont(size=13),
-        ).grid(row=0, column=2, padx=(0, 8))
+            bar, text="选择目录", width=90, height=32,
+            command=self.choose_directory,
+            fg_color=C_BG_RAISED, hover_color=C_BORDER,
+            font=ctk.CTkFont(size=11),
+        ).grid(row=0, column=2, padx=(0, 6))
 
         ctk.CTkButton(
-            bar, text="🔄 重新扫描", width=110, height=36, command=self.scan,
-            fg_color=COLOR_ACCENT, hover_color=COLOR_ACCENT_HOVER,
-            font=ctk.CTkFont(size=13, weight="bold"),
-        ).grid(row=0, column=3)
+            bar, text="重新扫描", width=100, height=32,
+            command=self.scan,
+            fg_color=C_ACCENT, hover_color=C_ACCENT_HOVER,
+            font=ctk.CTkFont(size=11, weight="bold"),
+        ).grid(row=0, column=3, padx=(0, 16))
 
-    def _build_filterbar(self, row: int) -> None:
-        bar = ctk.CTkFrame(self, fg_color="transparent")
-        bar.grid(row=row, column=0, sticky="ew", padx=16, pady=(0, 8))
+    def _build_filter_bar(self, row):
+        bar = ctk.CTkFrame(self, fg_color=C_BG_APP, corner_radius=0)
+        bar.grid(row=row, column=0, sticky="ew")
         bar.grid_columnconfigure(1, weight=1)
-
-        ctk.CTkLabel(bar, text="🔍 筛选", font=ctk.CTkFont(size=13))\
-            .grid(row=0, column=0, sticky="w")
 
         self.filter_var = tk.StringVar()
         self.filter_var.trace_add("write", lambda *_: self.apply_filter())
         ctk.CTkEntry(
-            bar, textvariable=self.filter_var, height=34,
-            placeholder_text="按文件名 / 类型 / 所在文件夹筛选…",
-            font=ctk.CTkFont(size=13),
-        ).grid(row=0, column=1, padx=(10, 10), sticky="ew")
+            bar, textvariable=self.filter_var, height=30,
+            placeholder_text="按名称 / 类型筛选…",
+            font=ctk.CTkFont(size=12),
+            fg_color=C_BG_SURFACE, border_color=C_BORDER,
+        ).grid(row=0, column=1, padx=(8, 8), sticky="ew", pady=8)
 
         ctk.CTkButton(
-            bar, text="全选", width=72, height=34, command=self.select_all,
-            fg_color=("#334155", "#1E293B"), hover_color=("#475569", "#334155"),
-        ).grid(row=0, column=2, padx=(0, 6))
+            bar, text="全选", width=60, height=30, command=self.select_all,
+            fg_color=C_BG_RAISED, hover_color=C_BORDER,
+            font=ctk.CTkFont(size=11),
+        ).grid(row=0, column=2, padx=(0, 4))
 
         ctk.CTkButton(
-            bar, text="全不选", width=80, height=34, command=self.clear_selection,
-            fg_color=("#334155", "#1E293B"), hover_color=("#475569", "#334155"),
-        ).grid(row=0, column=3, padx=(0, 6))
+            bar, text="全不选", width=68, height=30, command=self.clear_selection,
+            fg_color=C_BG_RAISED, hover_color=C_BORDER,
+            font=ctk.CTkFont(size=11),
+        ).grid(row=0, column=3, padx=(0, 8))
 
         self.count_label = ctk.CTkLabel(
-            bar, text="", font=ctk.CTkFont(size=12), text_color="#94A3B8",
+            bar, text="", font=ctk.CTkFont(size=11), text_color=C_TEXT_MUTED,
         )
-        self.count_label.grid(row=0, column=4, padx=(12, 0), sticky="e")
+        self.count_label.grid(row=0, column=4, padx=(0, 16), sticky="e")
 
-    def _build_body(self, row: int) -> None:
+    def _build_body(self, row):
         body = ctk.CTkFrame(self, fg_color="transparent")
-        body.grid(row=row, column=0, sticky="nsew", padx=16, pady=(0, 8))
-        body.grid_columnconfigure(0, weight=3)
-        body.grid_columnconfigure(1, weight=2)
-        body.grid_rowconfigure(1, weight=1)
+        body.grid(row=row, column=0, sticky="nsew", padx=0, pady=0)
+        body.grid_columnconfigure(1, weight=1)
+        body.grid_rowconfigure(0, weight=1)
 
-        # 列表区
-        list_card = ctk.CTkFrame(body, fg_color=("#1E293B", "#111827"), corner_radius=12)
-        list_card.grid(row=0, column=0, rowspan=2, sticky="nsew", padx=(0, 8))
-        list_card.grid_columnconfigure(0, weight=1)
-        list_card.grid_rowconfigure(1, weight=1)
+        # 左栏 140px
+        self._build_left_panel(body, 0)
+        # 中栏 flex
+        self._build_center_panel(body, 1)
+        # 右栏 200px
+        self._build_right_panel(body, 2)
 
+    def _build_left_panel(self, body, col):
+        panel = ctk.CTkFrame(body, fg_color=C_BG_APP, width=140, corner_radius=0)
+        panel.grid(row=0, column=col, sticky="ns")
+        panel.grid_propagate(False)
+        panel.grid_columnconfigure(0, weight=1)
+
+        # 统计区
         ctk.CTkLabel(
-            list_card, text="安装包列表", anchor="w",
-            font=ctk.CTkFont(size=14, weight="bold"),
-        ).grid(row=0, column=0, padx=16, pady=(12, 6), sticky="ew")
+            panel, text="统计", anchor="w",
+            font=ctk.CTkFont(size=10, weight="bold"), text_color=C_TEXT_SECONDARY,
+        ).grid(row=0, column=0, padx=12, pady=(12, 6), sticky="w")
 
-        # 表头
-        header = ctk.CTkFrame(list_card, fg_color=("#0F172A", "#0B1220"), corner_radius=8, height=32)
-        header.grid(row=0, column=0, padx=12, pady=(40, 6), sticky="ew")
-        header.grid_propagate(False)
-        header.grid_columnconfigure(2, weight=1)
+        self.stat_total_label = ctk.CTkLabel(
+            panel, text="0", font=ctk.CTkFont(size=22, weight="bold"),
+            text_color=C_ACCENT, anchor="w",
+        )
+        self.stat_total_label.grid(row=1, column=0, padx=12, sticky="w")
+        ctk.CTkLabel(
+            panel, text="总安装包", font=ctk.CTkFont(size=10), text_color=C_TEXT_MUTED,
+        ).grid(row=2, column=0, padx=12, sticky="w")
 
-        ctk.CTkLabel(header, text="", width=24).grid(row=0, column=0, padx=(12, 8))
-        ctk.CTkLabel(header, text="类型", width=54, anchor="w",
-                     font=ctk.CTkFont(size=11, weight="bold"), text_color="#94A3B8")\
-            .grid(row=0, column=1, padx=(0, 10))
-        ctk.CTkLabel(header, text="文件名", anchor="w",
-                     font=ctk.CTkFont(size=11, weight="bold"), text_color="#94A3B8")\
-            .grid(row=0, column=2, padx=(0, 10), sticky="ew")
-        ctk.CTkLabel(header, text="大小", width=80, anchor="e",
-                     font=ctk.CTkFont(size=11, weight="bold"), text_color="#94A3B8")\
-            .grid(row=0, column=3, padx=(0, 12))
-        ctk.CTkLabel(header, text="位置", anchor="w",
-                     font=ctk.CTkFont(size=11, weight="bold"), text_color="#94A3B8")\
-            .grid(row=0, column=4, padx=(0, 12), sticky="w")
+        # 已选 / 已装
+        sub_frame = ctk.CTkFrame(panel, fg_color="transparent")
+        sub_frame.grid(row=3, column=0, padx=8, pady=(8, 0), sticky="ew")
+        sub_frame.grid_columnconfigure(0, weight=1)
+        sub_frame.grid_columnconfigure(1, weight=1)
+
+        sel_card = ctk.CTkFrame(sub_frame, fg_color=C_BG_RAISED, corner_radius=8)
+        sel_card.grid(row=0, column=0, padx=(0, 4), sticky="ew")
+        self.stat_selected_label = ctk.CTkLabel(
+            sel_card, text="0", font=ctk.CTkFont(size=16, weight="bold"),
+            text_color=C_SUCCESS,
+        )
+        self.stat_selected_label.grid(row=0, column=0, padx=8, pady=(6, 0))
+        ctk.CTkLabel(
+            sel_card, text="已选", font=ctk.CTkFont(size=9), text_color=C_TEXT_MUTED,
+        ).grid(row=1, column=0, padx=8, pady=(0, 6))
+
+        done_card = ctk.CTkFrame(sub_frame, fg_color=C_BG_RAISED, corner_radius=8)
+        done_card.grid(row=0, column=1, padx=(4, 0), sticky="ew")
+        self.stat_done_label = ctk.CTkLabel(
+            done_card, text="0", font=ctk.CTkFont(size=16, weight="bold"),
+            text_color=C_TEXT_SECONDARY,
+        )
+        self.stat_done_label.grid(row=0, column=0, padx=8, pady=(6, 0))
+        ctk.CTkLabel(
+            done_card, text="已装", font=ctk.CTkFont(size=9), text_color=C_TEXT_MUTED,
+        ).grid(row=1, column=0, padx=8, pady=(0, 6))
+
+        # 类型筛选
+        ctk.CTkLabel(
+            panel, text="类型", anchor="w",
+            font=ctk.CTkFont(size=10, weight="bold"), text_color=C_TEXT_SECONDARY,
+        ).grid(row=4, column=0, padx=12, pady=(16, 6), sticky="w")
+
+        self.type_filter_frame = ctk.CTkFrame(panel, fg_color="transparent")
+        self.type_filter_frame.grid(row=5, column=0, padx=8, sticky="ew")
+        self.type_filter_frame.grid_columnconfigure(0, weight=1)
+
+    def _build_center_panel(self, body, col):
+        panel = ctk.CTkFrame(body, fg_color=C_BG_APP, corner_radius=0)
+        panel.grid(row=0, column=col, sticky="nsew", padx=(0, 0))
+        panel.grid_columnconfigure(0, weight=1)
+        panel.grid_rowconfigure(0, weight=1)
 
         # 滚动列表
         self.list_scroll = ctk.CTkScrollableFrame(
-            list_card, fg_color=("#1E293B", "#111827"), corner_radius=0,
+            panel, fg_color=C_BG_APP, corner_radius=0,
         )
-        self.list_scroll.grid(row=1, column=0, sticky="nsew", padx=4, pady=(0, 8))
+        self.list_scroll.grid(row=0, column=0, sticky="nsew", padx=8, pady=8)
         self.list_scroll.grid_columnconfigure(0, weight=1)
 
-        # 详情区
-        detail = ctk.CTkFrame(body, fg_color=("#1E293B", "#111827"), corner_radius=12)
-        detail.grid(row=0, column=1, rowspan=2, sticky="nsew")
-        detail.grid_columnconfigure(0, weight=1)
-        detail.grid_rowconfigure(3, weight=1)
-        detail.grid_rowconfigure(5, weight=1)
+        # 空状态(默认隐藏)
+        self.empty_state = EmptyState(self.list_scroll, self.scan)
+
+    def _build_right_panel(self, body, col):
+        panel = ctk.CTkFrame(body, fg_color=C_BG_APP, width=200, corner_radius=0)
+        panel.grid(row=0, column=col, sticky="ns")
+        panel.grid_propagate(False)
+        panel.grid_columnconfigure(0, weight=1)
 
         ctk.CTkLabel(
-            detail, text="安装包详情", anchor="w",
-            font=ctk.CTkFont(size=14, weight="bold"),
-        ).grid(row=0, column=0, padx=16, pady=(12, 8), sticky="ew")
+            panel, text="详情", anchor="w",
+            font=ctk.CTkFont(size=10, weight="bold"), text_color=C_TEXT_SECONDARY,
+        ).grid(row=0, column=0, padx=12, pady=(12, 4), sticky="w")
 
         self.detail_name = ctk.CTkLabel(
-            detail, text="未选择安装包", anchor="w",
-            font=ctk.CTkFont(size=13, weight="bold"),
-            text_color=("#F1F5F9", "#E2E8F0"),
+            panel, text="未选择安装包", anchor="w",
+            font=ctk.CTkFont(size=12, weight="bold"), text_color=C_TEXT_TITLE,
+            wraplength=176,
         )
-        self.detail_name.grid(row=1, column=0, padx=16, pady=(0, 2), sticky="ew")
+        self.detail_name.grid(row=1, column=0, padx=12, sticky="w")
 
         self.detail_path = ctk.CTkLabel(
-            detail, text="", anchor="w",
-            font=ctk.CTkFont(size=11), text_color="#64748B", wraplength=380, justify="left",
+            panel, text="", anchor="w",
+            font=ctk.CTkFont(family="Consolas", size=9), text_color=C_TEXT_MUTED,
+            wraplength=176, justify="left",
         )
-        self.detail_path.grid(row=2, column=0, padx=16, pady=(0, 10), sticky="ew")
+        self.detail_path.grid(row=2, column=0, padx=12, pady=(0, 10), sticky="w")
 
-        # 安装参数
-        ctk.CTkLabel(detail, text="安装参数(留空使用默认)",
-                     anchor="w", font=ctk.CTkFont(size=12), text_color="#94A3B8")\
-            .grid(row=3, column=0, padx=16, pady=(0, 4), sticky="new")
+        ctk.CTkLabel(
+            panel, text="安装参数", anchor="w",
+            font=ctk.CTkFont(size=10), text_color=C_TEXT_SECONDARY,
+        ).grid(row=3, column=0, padx=12, pady=(0, 4), sticky="w")
 
         self.args_var = tk.StringVar()
         self.args_entry = ctk.CTkEntry(
-            detail, textvariable=self.args_var, height=34,
-            placeholder_text="/VERYSILENT /SUPPRESSMSGBOXES /NORESTART",
-            font=ctk.CTkFont(family="Consolas", size=12),
+            panel, textvariable=self.args_var, height=28,
+            font=ctk.CTkFont(family="Consolas", size=10),
+            fg_color=C_BG_SURFACE, border_color=C_BORDER,
         )
-        self.args_entry.grid(row=4, column=0, padx=16, pady=(0, 10), sticky="ew")
-        self.args_entry.bind("<FocusOut>", lambda _e: self.save_args())
-        self.args_entry.bind("<Return>", lambda _e: self.save_args())
+        self.args_entry.grid(row=4, column=0, padx=12, sticky="ew")
+        self.args_entry.bind("<FocusOut>", lambda e: self.save_args())
+        self.args_entry.bind("<Return>", lambda e: self.save_args())
 
-        # 命令预览
-        ctk.CTkLabel(detail, text="命令预览",
-                     anchor="w", font=ctk.CTkFont(size=12), text_color="#94A3B8")\
-            .grid(row=5, column=0, padx=16, pady=(0, 4), sticky="new")
+        ctk.CTkLabel(
+            panel, text="命令预览", anchor="w",
+            font=ctk.CTkFont(size=10), text_color=C_TEXT_SECONDARY,
+        ).grid(row=5, column=0, padx=12, pady=(12, 4), sticky="w")
 
         self.preview_box = ctk.CTkTextbox(
-            detail, height=80, font=ctk.CTkFont(family="Consolas", size=12),
-            fg_color=("#0F172A", "#0B1220"), text_color="#CBD5E1",
+            panel, height=80,
+            font=ctk.CTkFont(family="Consolas", size=10),
+            fg_color=C_BG_SURFACE, text_color=C_TEXT_PRIMARY,
+            border_width=0.5, border_color=C_BORDER, corner_radius=6,
         )
-        self.preview_box.grid(row=6, column=0, padx=16, pady=(0, 16), sticky="nsew")
+        self.preview_box.grid(row=6, column=0, padx=12, sticky="ew", pady=(0, 12))
         self.preview_box.configure(state="disabled")
 
-    def _build_bottom(self, row: int) -> None:
-        bar = ctk.CTkFrame(self, fg_color=("#1E293B", "#111827"), corner_radius=12)
-        bar.grid(row=row, column=0, sticky="ew", padx=16, pady=(0, 6))
+    def _build_progress_bar(self, row):
+        bar = ctk.CTkFrame(self, fg_color=C_BG_APP, corner_radius=0)
+        bar.grid(row=row, column=0, sticky="ew")
         bar.grid_columnconfigure(1, weight=1)
 
-        ctk.CTkLabel(bar, text="🚀 部署进度", font=ctk.CTkFont(size=13, weight="bold"))\
-            .grid(row=0, column=0, padx=(16, 12), pady=14, sticky="w")
+        ctk.CTkLabel(
+            bar, text="部署进度", font=ctk.CTkFont(size=11, weight="bold"),
+            text_color=C_TEXT_SECONDARY,
+        ).grid(row=0, column=0, padx=(16, 8), pady=12, sticky="w")
 
-        self.progress = ctk.CTkProgressBar(bar, height=10, corner_radius=6,
-                                           progress_color=COLOR_ACCENT)
-        self.progress.grid(row=0, column=1, padx=(0, 12), pady=14, sticky="ew")
+        self.progress = ctk.CTkProgressBar(
+            bar, height=6, corner_radius=3, progress_color=C_ACCENT,
+        )
+        self.progress.grid(row=0, column=1, padx=(0, 8), pady=12, sticky="ew")
         self.progress.set(0)
 
         self.progress_label = ctk.CTkLabel(
-            bar, text="0 / 0", width=80,
-            font=ctk.CTkFont(size=12), text_color="#94A3B8",
+            bar, text="0 / 0", width=50,
+            font=ctk.CTkFont(size=11), text_color=C_TEXT_MUTED,
         )
-        self.progress_label.grid(row=0, column=2, padx=(0, 12))
+        self.progress_label.grid(row=0, column=2, padx=(0, 8))
 
         self.install_button = ctk.CTkButton(
-            bar, text="▶ 开始安装", width=140, height=38,
+            bar, text="开始安装", width=110, height=32,
             command=self.start_install,
-            fg_color=COLOR_ACCENT, hover_color=COLOR_ACCENT_HOVER,
-            font=ctk.CTkFont(size=14, weight="bold"),
+            fg_color=C_ACCENT, hover_color=C_ACCENT_HOVER,
+            font=ctk.CTkFont(size=12, weight="bold"),
         )
-        self.install_button.grid(row=0, column=3, padx=(0, 16), pady=10)
+        self.install_button.grid(row=0, column=3, padx=(0, 6), pady=8)
 
         self.stop_button = ctk.CTkButton(
-            bar, text="⏹ 停止", width=80, height=38,
+            bar, text="停止", width=60, height=32,
             command=self.request_stop,
-            fg_color=("#475569", "#334155"), hover_color=("#64748B", "#475569"),
-            state="disabled", font=ctk.CTkFont(size=13),
+            fg_color=C_BG_RAISED, hover_color=C_BORDER,
+            state="disabled", font=ctk.CTkFont(size=11),
         )
-        self.stop_button.grid(row=0, column=4, padx=(0, 16), pady=10)
+        self.stop_button.grid(row=0, column=4, padx=(0, 16), pady=8)
 
-        # 日志区
-        log_card = ctk.CTkFrame(self, fg_color=("#1E293B", "#111827"), corner_radius=12)
-        log_card.grid(row=row + 1, column=0, sticky="nsew", padx=16, pady=(0, 8))
-        log_card.grid_columnconfigure(0, weight=1)
-        log_card.grid_rowconfigure(1, weight=1)
+    def _build_log_area(self, row):
+        self.grid_rowconfigure(row, weight=0)
+        log_frame = ctk.CTkFrame(self, fg_color=C_BG_APP, corner_radius=0)
+        log_frame.grid(row=row, column=0, sticky="ew")
+        log_frame.grid_columnconfigure(0, weight=1)
 
-        log_header = ctk.CTkFrame(log_card, fg_color="transparent")
-        log_header.grid(row=0, column=0, sticky="ew", padx=16, pady=(10, 4))
-        log_header.grid_columnconfigure(0, weight=1)
+        header = ctk.CTkFrame(log_frame, fg_color="transparent")
+        header.grid(row=0, column=0, sticky="ew", padx=16, pady=(4, 2))
+        header.grid_columnconfigure(0, weight=1)
 
-        ctk.CTkLabel(log_header, text="📋 部署日志",
-                     font=ctk.CTkFont(size=13, weight="bold"))\
-            .grid(row=0, column=0, sticky="w")
+        ctk.CTkLabel(
+            header, text="部署日志", anchor="w",
+            font=ctk.CTkFont(size=10, weight="bold"), text_color=C_TEXT_SECONDARY,
+        ).grid(row=0, column=0, sticky="w")
 
         ctk.CTkButton(
-            log_header, text="清空", width=60, height=26, command=self.clear_log,
-            fg_color=("#334155", "#1E293B"), hover_color=("#475569", "#334155"),
-            font=ctk.CTkFont(size=11),
+            header, text="清空", width=50, height=22, command=self.clear_log,
+            fg_color=C_BG_RAISED, hover_color=C_BORDER,
+            font=ctk.CTkFont(size=10),
         ).grid(row=0, column=1, sticky="e")
 
         self.log_box = ctk.CTkTextbox(
-            log_card,
-            font=ctk.CTkFont(family="Consolas", size=12),
-            fg_color=("#0F172A", "#0B1220"), text_color="#CBD5E1",
+            log_frame, height=100,
+            font=ctk.CTkFont(family="Consolas", size=10),
+            fg_color=C_BG_APP, text_color=C_TEXT_SECONDARY,
         )
-        self.log_box.grid(row=1, column=0, sticky="nsew", padx=16, pady=(0, 12))
+        self.log_box.grid(row=1, column=0, sticky="ew", padx=16, pady=(0, 4))
 
-        # 调整主网格,把日志也加入 stretch
-        self.grid_rowconfigure(row + 1, weight=1)
-
-    def _build_statusbar(self, row: int) -> None:
-        bar = ctk.CTkFrame(self, fg_color=("#0F172A", "#0B1220"), corner_radius=0, height=28)
+    def _build_status_bar(self, row):
+        bar = ctk.CTkFrame(self, fg_color=C_BG_SURFACE, corner_radius=0)
         bar.grid(row=row, column=0, sticky="ew")
-        bar.grid_propagate(False)
         bar.grid_columnconfigure(0, weight=1)
 
         self.status_var = tk.StringVar(value="就绪")
-        ctk.CTkLabel(bar, textvariable=self.status_var,
-                     font=ctk.CTkFont(size=11), text_color="#94A3B8")\
-            .grid(row=0, column=0, padx=16, pady=6, sticky="w")
+        ctk.CTkLabel(
+            bar, textvariable=self.status_var,
+            font=ctk.CTkFont(size=10), text_color=C_TEXT_MUTED,
+        ).grid(row=0, column=0, padx=12, pady=4, sticky="w")
 
-        self.tip_var = tk.StringVar(value="提示: 双击行或点击勾选框选择要安装的包")
-        ctk.CTkLabel(bar, textvariable=self.tip_var,
-                     font=ctk.CTkFont(size=11), text_color="#64748B")\
-            .grid(row=0, column=1, padx=16, pady=6, sticky="e")
+        ctk.CTkLabel(
+            bar, text="双击选择 · Space 切换 · Enter 安装 · Ctrl+A 全选 · Ctrl+R 扫描",
+            font=ctk.CTkFont(size=9), text_color=C_TEXT_MUTED,
+        ).grid(row=0, column=1, padx=12, pady=4, sticky="e")
+
+    # ---------- 键盘快捷键 ----------
+
+    def _bind_shortcuts(self):
+        self.bind("<Control-a>", lambda e: self.select_all())
+        self.bind("<Control-A>", lambda e: self.select_all())
+        self.bind("<Control-r>", lambda e: self.scan())
+        self.bind("<Control-R>", lambda e: self.scan())
+        self.bind("<Control-f>", lambda e: self.filter_var.set("") or self._focus_filter())
+        self.bind("<Control-F>", lambda e: self.filter_var.set("") or self._focus_filter())
+        self.bind("<Return>", lambda e: self.start_install())
+        self.bind("<Escape>", lambda e: self._on_escape())
+
+    def _focus_filter(self):
+        try:
+            self.filter_entry.focus_set()
+        except Exception:
+            pass
+
+    def _on_escape(self):
+        # 如果有筛选,清除筛选;否则不做
+        if self.filter_var.get():
+            self.filter_var.set("")
 
     # ---------- 行为 ----------
 
-    def choose_directory(self) -> None:
+    def choose_directory(self):
         chosen = filedialog.askdirectory(initialdir=str(self.root_dir))
         if not chosen:
             return
@@ -505,140 +669,197 @@ class InstallerManagerApp(ctk.CTk):
         self.dir_var.set(str(self.root_dir))
         self.scan()
 
-    def scan(self) -> None:
+    def scan(self):
         self.save_args()
         self.packages = find_installers(self.root_dir)
-        existing_paths = {package.path for package in self.packages}
-        self.selected_paths &= existing_paths
-        self.custom_args = {
-            path: args for path, args in self.custom_args.items() if path in existing_paths
-        }
+        existing = {p.path for p in self.packages}
+        self.selected_paths &= existing
+        self.custom_args = {k: v for k, v in self.custom_args.items() if k in existing}
+        # 重置安装状态
+        self.card_states = {p: S_UNSELECTED for p in self.packages}
+        self._type_filter = None
         self.apply_filter()
-        self.log(f"✓ 已扫描到 {len(self.packages)} 个安装包")
-        if not self.packages:
-            self.status_var.set("未发现安装包")
-        else:
-            self.status_var.set("就绪")
+        self._update_left_panel()
+        self.log(f"已扫描到 {len(self.packages)} 个安装包")
+        self.status_var.set("就绪")
 
-    def apply_filter(self) -> None:
+    def apply_filter(self):
         keyword = self.filter_var.get().strip().lower()
-        if keyword:
-            self.filtered = [
-                package for package in self.packages
-                if keyword in package.name.lower()
-                or keyword in package.relative_folder.lower()
-                or keyword in package.extension.lower()
-            ]
-        else:
-            self.filtered = list(self.packages)
+        self.filtered = []
+        for p in self.packages:
+            # 类型筛选
+            if self._type_filter and p.extension != self._type_filter:
+                continue
+            # 关键字筛选
+            if keyword:
+                if (keyword not in p.name.lower()
+                        and keyword not in p.relative_folder.lower()
+                        and keyword not in p.extension.lower()):
+                    continue
+            self.filtered.append(p)
         self.render_list()
 
-    def render_list(self) -> None:
-        # 清空旧行
-        for widget in self.list_scroll.winfo_children():
-            widget.destroy()
-        self._rows.clear()
+    def render_list(self):
+        # 清空旧卡片
+        for w in self.list_scroll.winfo_children():
+            w.destroy()
+        self._cards.clear()
 
-        for index, package in enumerate(self.filtered):
-            row = PackageRow(
-                self.list_scroll, package,
-                selected=package.path in self.selected_paths,
-                on_toggle=self._on_toggle,
-                on_select=self._on_select,
-            )
-            row.grid(row=index, column=0, sticky="ew", padx=4, pady=2)
-            self._rows[package.path] = row
-            if package is self._current_package:
-                row.set_selected(package.path in self.selected_paths, highlight=True)
+        if not self.filtered:
+            # 显示空状态
+            self.empty_state = EmptyState(self.list_scroll, self.scan)
+            self.empty_state.grid(row=0, column=0, sticky="nsew", padx=20, pady=20)
+        else:
+            for i, pkg in enumerate(self.filtered):
+                state = self.card_states.get(pkg.path, S_UNSELECTED)
+                if pkg.path in self.selected_paths and state == S_UNSELECTED:
+                    state = S_SELECTED
+                card = PackageCard(
+                    self.list_scroll, pkg,
+                    on_toggle=self._on_toggle,
+                    on_select=self._on_select,
+                )
+                card.grid(row=i, column=0, sticky="ew", padx=4, pady=2)
+                card.set_state(state)
+                self._cards[pkg.path] = card
 
+        self._update_count_label()
+
+    def _on_toggle(self, pkg: InstallerPackage):
+        if self._is_installing:
+            return
+        if pkg.path in self.selected_paths:
+            self.selected_paths.remove(pkg.path)
+            self.card_states[pkg.path] = S_UNSELECTED
+        else:
+            self.selected_paths.add(pkg.path)
+            self.card_states[pkg.path] = S_SELECTED
+        # 更新卡片
+        card = self._cards.get(pkg.path)
+        if card:
+            card.set_state(self.card_states[pkg.path])
+        self._update_count_label()
+        self._update_left_panel()
+
+    def _on_select(self, pkg: InstallerPackage):
+        self._current_package = pkg
+        self.refresh_details()
+
+    def _update_count_label(self):
         total = len(self.packages)
         shown = len(self.filtered)
         selected = len(self.selected_paths)
         if shown == total:
-            self.count_label.configure(text=f"共 {total} 个  · 已选 {selected}")
+            self.count_label.configure(text=f"共 {total} · 已选 {selected}")
         else:
-            self.count_label.configure(text=f"显示 {shown} / 共 {total}  · 已选 {selected}")
+            self.count_label.configure(text=f"显示 {shown} / 共 {total} · 已选 {selected}")
 
-        self.status_var.set(f"显示 {shown} 个,已选 {selected} 个")
+    def _update_left_panel(self):
+        """更新左栏统计和类型筛选。"""
+        self.stat_total_label.configure(text=str(len(self.packages)))
+        self.stat_selected_label.configure(text=str(len(self.selected_paths)))
+        done = sum(1 for s in self.card_states.values() if s == S_COMPLETED)
+        self.stat_done_label.configure(text=str(done))
 
-    def _on_toggle(self, package: InstallerPackage) -> None:
-        if package.path in self.selected_paths:
-            self.selected_paths.remove(package.path)
-        else:
-            self.selected_paths.add(package.path)
-        # 只更新这一行,避免全列表重绘
-        row = self._rows.get(package.path)
-        if row:
-            row.set_selected(package.path in self.selected_paths, highlight=True)
-        self._update_count_label()
-        self._current_package = package
-        self.refresh_details()
-
-    def _on_select(self, package: InstallerPackage) -> None:
-        prev = self._current_package
-        self._current_package = package
-        if prev and prev in self._rows:
-            self._rows[prev].set_selected(
-                prev.path in self.selected_paths, highlight=False,
+        # 类型筛选标签
+        for w in self.type_filter_frame.winfo_children():
+            w.destroy()
+        ext_counts: Dict[str, int] = {}
+        for p in self.packages:
+            ext_counts[p.extension] = ext_counts.get(p.extension, 0) + 1
+        for i, (ext, count) in enumerate(sorted(ext_counts.items())):
+            color = EXT_COLORS.get(ext, C_TEXT_MUTED)
+            is_active = self._type_filter == ext
+            bg = C_BG_RAISED if is_active else "transparent"
+            border = color if is_active else C_BORDER
+            label = ctk.CTkFrame(
+                self.type_filter_frame, fg_color=bg, corner_radius=6,
+                border_width=0.5, border_color=border, height=24,
             )
-        if package in self._rows:
-            self._rows[package].set_selected(
-                package.path in self.selected_paths, highlight=True,
-            )
-        self.refresh_details()
+            label.grid(row=i, column=0, padx=4, pady=1, sticky="ew")
+            label.grid_columnconfigure(1, weight=1)
+            ctk.CTkLabel(
+                label, text="", width=8, height=8, corner_radius=2, fg_color=color,
+            ).grid(row=0, column=0, padx=(6, 4), pady=6)
+            ext_text = ext.lstrip(".").upper()
+            ctk.CTkLabel(
+                label, text=ext_text, font=ctk.CTkFont(size=10),
+                text_color=C_TEXT_PRIMARY if is_active else C_TEXT_SECONDARY,
+            ).grid(row=0, column=1, padx=(0, 4), sticky="w")
+            ctk.CTkLabel(
+                label, text=str(count), font=ctk.CTkFont(size=10),
+                text_color=C_TEXT_MUTED,
+            ).grid(row=0, column=2, padx=(0, 6))
+            # 点击切换类型筛选
+            label.bind("<Button-1>", lambda e, x=ext: self._toggle_type_filter(x))
+            for child in label.winfo_children():
+                child.bind("<Button-1>", lambda e, x=ext: self._toggle_type_filter(x))
 
-    def _update_count_label(self) -> None:
-        total = len(self.packages)
-        shown = len(self.filtered)
-        selected = len(self.selected_paths)
-        if shown == total:
-            self.count_label.configure(text=f"共 {total} 个  · 已选 {selected}")
+    def _toggle_type_filter(self, ext: str):
+        if self._is_installing:
+            return
+        if self._type_filter == ext:
+            self._type_filter = None
         else:
-            self.count_label.configure(text=f"显示 {shown} / 共 {total}  · 已选 {selected}")
-        self.status_var.set(f"显示 {shown} 个,已选 {selected} 个")
+            self._type_filter = ext
+        self.apply_filter()
+        self._update_left_panel()
 
-    def select_all(self) -> None:
-        self.selected_paths.update(package.path for package in self.filtered)
-        self._refresh_row_checkboxes()
+    def select_all(self):
+        if self._is_installing:
+            return
+        for p in self.filtered:
+            self.selected_paths.add(p.path)
+            self.card_states[p.path] = S_SELECTED
+        self._refresh_card_states()
         self._update_count_label()
+        self._update_left_panel()
 
-    def clear_selection(self) -> None:
-        self.selected_paths.difference_update(package.path for package in self.filtered)
-        self._refresh_row_checkboxes()
+    def clear_selection(self):
+        if self._is_installing:
+            return
+        for p in self.filtered:
+            self.selected_paths.discard(p.path)
+            if self.card_states.get(p.path) == S_SELECTED:
+                self.card_states[p.path] = S_UNSELECTED
+        self._refresh_card_states()
         self._update_count_label()
+        self._update_left_panel()
 
-    def _refresh_row_checkboxes(self) -> None:
-        for path, row in self._rows.items():
-            row.set_selected(path in self.selected_paths,
-                             highlight=self._current_package is not None and path == self._current_package.path)
+    def _refresh_card_states(self):
+        for path, card in self._cards.items():
+            state = self.card_states.get(path, S_UNSELECTED)
+            if path in self.selected_paths and state == S_UNSELECTED:
+                state = S_SELECTED
+            card.set_state(state)
 
-    def refresh_details(self) -> None:
-        package = self._current_package
-        if not package:
+    def refresh_details(self):
+        pkg = self._current_package
+        if not pkg:
             self.detail_name.configure(text="未选择安装包")
-            self.detail_path.configure(text="从左侧列表中选择一个安装包查看详情")
+            self.detail_path.configure(text="")
             self.args_var.set("")
             self._set_preview("")
             return
-        self.detail_name.configure(text=package.name)
-        self.detail_path.configure(text=f"📁 {package.path}")
-        args = self.custom_args.get(package.path, "")
+        self.detail_name.configure(text=pkg.name)
+        self.detail_path.configure(text=str(pkg.path))
+        args = self.custom_args.get(pkg.path, "")
         if self.args_var.get() != args:
             self.args_var.set(args)
-        self._set_preview(command_preview(package.path, args))
+        self._set_preview(command_preview(pkg.path, args))
 
-    def save_args(self) -> None:
-        package = self._current_package
-        if not package:
+    def save_args(self):
+        pkg = self._current_package
+        if not pkg:
             return
         args = self.args_var.get().strip()
         if args:
-            self.custom_args[package.path] = args
+            self.custom_args[pkg.path] = args
         else:
-            self.custom_args.pop(package.path, None)
-        self._set_preview(command_preview(package.path, args))
+            self.custom_args.pop(pkg.path, None)
+        self._set_preview(command_preview(pkg.path, args))
 
-    def _set_preview(self, text: str) -> None:
+    def _set_preview(self, text: str):
         self.preview_box.configure(state="normal")
         self.preview_box.delete("1.0", tk.END)
         self.preview_box.insert("1.0", text)
@@ -646,202 +867,208 @@ class InstallerManagerApp(ctk.CTk):
 
     # ---------- 安装流程 ----------
 
-    def start_install(self) -> None:
-        self.save_args()
-        if self.worker and self.worker.is_alive():
-            self._toast("当前安装任务还没结束")
+    def start_install(self):
+        if self._is_installing:
             return
+        self.save_args()
         packages = [p for p in self.packages if p.path in self.selected_paths]
         if not packages:
-            self._toast("请先勾选要安装的安装包")
+            self._toast("请先勾选要安装的安装包", "warning")
+            return
+        if not self._confirm_dialog(packages):
             return
 
-        confirm = self._confirm_dialog(packages)
-        if not confirm:
-            return
-
+        self._is_installing = True
         self.stop_event.clear()
         self.install_button.configure(state="disabled", text="安装中…")
         self.stop_button.configure(state="normal")
         self.progress.set(0)
         self.progress_label.configure(text=f"0 / {len(packages)}")
         self.status_var.set("正在安装…")
+        self.progress.configure(progress_color=C_ACCENT)
 
         self.worker = threading.Thread(
-            target=self._install_worker,
-            args=(packages,),
-            daemon=True,
-        )
+            target=self._install_worker, args=(packages,), daemon=True)
         self.worker.start()
 
-    def _install_worker(self, packages: List[InstallerPackage]) -> None:
+    def _install_worker(self, packages: List[InstallerPackage]):
         total = len(packages)
         completed = 0
         had_error = False
-        for index, package in enumerate(packages, start=1):
+        for index, pkg in enumerate(packages, start=1):
             if self.stop_event.is_set():
-                self.events.put(("log", "⚠ 已停止,跳过剩余安装包"))
+                self.events.put(("log", "已停止,跳过剩余安装包"))
                 break
-            args = self.custom_args.get(package.path, "")
-            self.events.put(("progress", InstallProgress(
-                index=index, total=total, package=package, stage="start",
-            )))
-            result = install_package(package.path, args)
+            args = self.custom_args.get(pkg.path, "")
+            self.events.put(("progress", index, total, pkg, "start"))
+            result = install_package(pkg.path, args)
             completed += 1
             if result.success:
-                self.events.put(("progress", InstallProgress(
-                    index=index, total=total, package=package,
-                    stage="finish", result=result,
-                )))
+                self.card_states[pkg.path] = S_COMPLETED
+                self.events.put(("progress", index, total, pkg, "finish", result))
             else:
                 had_error = True
-                self.events.put(("progress", InstallProgress(
-                    index=index, total=total, package=package,
-                    stage="failed", result=result, aborted=self.stop_event.is_set(),
-                )))
-                # 出错时跳过剩余,避免连锁失败
+                self.card_states[pkg.path] = S_FAILED
+                self.events.put(("progress", index, total, pkg, "failed", result))
                 if not self.stop_event.is_set():
-                    self.events.put(("log", "⚠ 检测到失败,跳过剩余安装包"))
+                    self.events.put(("log", f"检测到失败,跳过剩余安装包"))
                     break
         if completed == total and not had_error:
-            self.events.put(("finished", InstallResult(
-                success=True, return_code=0, message="全部完成",
-            )))
+            self.events.put(("finished", True, "全部完成"))
         else:
-            self.events.put(("finished", InstallResult(
-                success=False, return_code=-1,
-                message="已停止" if self.stop_event.is_set() else "存在失败项",
-            )))
+            msg = "已停止" if self.stop_event.is_set() else "存在失败项"
+            self.events.put(("finished", False, msg))
 
-    def request_stop(self) -> None:
+    def request_stop(self):
         self.stop_event.set()
         self.stop_button.configure(state="disabled")
-        self.log("⚠ 已请求停止")
+        self.log("已请求停止")
 
-    def _poll_events(self) -> None:
+    def _poll_events(self):
         try:
             while True:
                 event = self.events.get_nowait()
                 kind = event[0]
                 if kind == "progress":
-                    self._on_progress(event[1])
+                    self._on_progress_event(event)
+                elif kind == "log":
+                    self.log(event[1])
                 elif kind == "finished":
-                    self._on_finished(event[1])
+                    self._on_finished(event[1], event[2])
         except queue.Empty:
             pass
         self.after(100, self._poll_events)
 
-    def _on_progress(self, progress: InstallProgress) -> None:
-        ratio = (progress.index - 1 + (1 if progress.stage == "finish" else 0)) / max(progress.total, 1)
-        self.progress.set(max(0.0, min(1.0, ratio)))
-        self.progress_label.configure(
-            text=f"{progress.index if progress.stage == 'finish' else progress.index - 1} / {progress.total}"
-        )
-        ts = datetime.now().strftime("%H:%M:%S")
-        if progress.stage == "start":
-            self.log(f"[{ts}] [{progress.index}/{progress.total}] ▶ 开始安装: {progress.package.name}")
-            self.log(f"        命令: {command_preview(progress.package.path, self.custom_args.get(progress.package.path, ''))}")
-        elif progress.stage == "finish":
-            self.log(f"[{ts}] [{progress.index}/{progress.total}] ✓ 完成 ({progress.result.message})")
-        elif progress.stage == "failed":
-            self.log(f"[{ts}] [{progress.index}/{progress.total}] ✗ 失败: {progress.result.message} (返回码 {progress.result.return_code})")
+    def _on_progress_event(self, event):
+        _, index, total, pkg, stage = event[:5]
+        result = event[5] if len(event) > 5 else None
 
-    def _on_finished(self, result) -> None:
-        self.progress.set(1.0)
-        self.install_button.configure(state="normal", text="▶ 开始安装")
+        ratio = (index - 1 + (1 if stage in ("finish", "failed") else 0)) / max(total, 1)
+        self.progress.set(max(0.0, min(1.0, ratio)))
+        done_count = index - 1 + (1 if stage in ("finish", "failed") else 0)
+        self.progress_label.configure(text=f"{done_count} / {total}")
+
+        ts = datetime.now().strftime("%H:%M:%S")
+        if stage == "start":
+            self.log(f"[{ts}] [{index}/{total}] 开始: {pkg.name}")
+            self.log(f"  命令: {command_preview(pkg.path, self.custom_args.get(pkg.path, ''))}")
+            # 更新卡片状态为安装中
+            card = self._cards.get(pkg.path)
+            if card:
+                card.set_state(S_INSTALLING)
+        elif stage == "finish":
+            self.log(f"[{ts}] [{index}/{total}] 完成 · {result.message}")
+            card = self._cards.get(pkg.path)
+            if card:
+                card.set_state(S_COMPLETED, result.message)
+        elif stage == "failed":
+            self.log(f"[{ts}] [{index}/{total}] 失败 · {result.message} (返回码 {result.return_code})")
+            card = self._cards.get(pkg.path)
+            if card:
+                card.set_state(S_FAILED, f"失败 · {result.return_code}")
+
+        self._update_left_panel()
+
+    def _on_finished(self, success: bool, message: str):
+        self._is_installing = False
+        self.progress.set(1.0 if success else self.progress.get())
+        self.progress.configure(progress_color=C_SUCCESS if success else C_ERROR)
+        self.install_button.configure(state="normal", text="开始安装")
         self.stop_button.configure(state="disabled")
-        if result.success:
+        if success:
             self.status_var.set("全部安装完成")
-            self.log("✅ 全部安装完成")
-            self._toast("全部安装完成", level="success")
+            self.log("全部安装完成")
+            self._toast("全部安装完成", "success")
         else:
-            self.status_var.set(f"安装流程结束: {result.message}")
-            self.log(f"⚠ 安装流程结束: {result.message}")
-            self._toast(f"安装结束: {result.message}", level="warning")
+            self.status_var.set(f"安装结束: {message}")
+            self.log(f"安装结束: {message}")
+            self._toast(f"安装结束: {message}", "warning")
+        self._update_left_panel()
 
     # ---------- 日志 ----------
 
-    def log(self, message: str) -> None:
-        self.log_box.insert(tk.END, message + "\n")
+    def log(self, message: str):
+        ts = datetime.now().strftime("%H:%M:%S")
+        self.log_box.insert(tk.END, f"[{ts}] {message}\n")
         self.log_box.see(tk.END)
 
-    def clear_log(self) -> None:
+    def clear_log(self):
         self.log_box.delete("1.0", tk.END)
 
-    # ---------- 简易弹窗 ----------
+    # ---------- Toast ----------
 
-    def _toast(self, message: str, level: str = "info") -> None:
-        """右下角短暂提示。"""
+    def _toast(self, message: str, level: str = "info"):
         colors = {
-            "info": COLOR_ACCENT,
-            "success": COLOR_SUCCESS,
-            "warning": COLOR_WARNING,
-            "error": COLOR_ERROR,
+            "info": C_ACCENT, "success": C_SUCCESS,
+            "warning": C_WARNING, "error": C_ERROR,
         }
-        color = colors.get(level, COLOR_ACCENT)
         toast = ctk.CTkLabel(
             self, text=message, corner_radius=8,
-            fg_color=color, text_color="#FFFFFF",
-            font=ctk.CTkFont(size=13, weight="bold"),
-            padx=18, pady=10,
+            fg_color=colors.get(level, C_ACCENT), text_color="#FFFFFF",
+            font=ctk.CTkFont(size=12, weight="bold"),
+            padx=16, pady=8,
         )
-        toast.place(relx=0.5, y=80, anchor="n")
-        self.after(2200, toast.destroy)
+        toast.place(relx=0.5, y=70, anchor="n")
+        self.after(2000, toast.destroy)
+
+    # ---------- 确认对话框 ----------
 
     def _confirm_dialog(self, packages: List[InstallerPackage]) -> bool:
-        """自定义确认对话框。"""
         dlg = ctk.CTkToplevel(self)
         dlg.title("确认开始安装")
-        dlg.geometry("460x420")
+        dlg.geometry("420x380")
         dlg.transient(self)
         dlg.grab_set()
         dlg.resizable(False, False)
+        dlg.configure(fg_color=C_BG_APP)
 
         ctk.CTkLabel(
             dlg, text="即将开始批量安装",
-            font=ctk.CTkFont(size=16, weight="bold"),
+            font=ctk.CTkFont(size=15, weight="bold"), text_color=C_TEXT_TITLE,
         ).pack(pady=(20, 4), padx=20, anchor="w")
 
         ctk.CTkLabel(
             dlg, text=f"将按顺序静默安装 {len(packages)} 个安装包,无法撤销。",
-            font=ctk.CTkFont(size=12), text_color="#94A3B8",
+            font=ctk.CTkFont(size=11), text_color=C_TEXT_SECONDARY,
         ).pack(pady=(0, 12), padx=20, anchor="w")
 
-        list_frame = ctk.CTkScrollableFrame(dlg, height=220, corner_radius=8,
-                                            fg_color=("#1E293B", "#111827"))
+        list_frame = ctk.CTkScrollableFrame(
+            dlg, height=200, corner_radius=8, fg_color=C_BG_SURFACE)
         list_frame.pack(fill="both", expand=True, padx=20, pady=(0, 8))
         for i, pkg in enumerate(packages, start=1):
             ctk.CTkLabel(
-                list_frame,
-                text=f"{i:>2}.  {pkg.name}",
-                anchor="w", font=ctk.CTkFont(family="Consolas", size=12),
+                list_frame, text=f"{i:>2}.  {pkg.name}", anchor="w",
+                font=ctk.CTkFont(family="Consolas", size=11),
+                text_color=C_TEXT_PRIMARY,
             ).pack(fill="x", padx=8, pady=2)
 
         result = {"ok": False}
 
-        def yes() -> None:
+        def yes():
             result["ok"] = True
             dlg.destroy()
 
-        def no() -> None:
+        def no():
             dlg.destroy()
 
         btns = ctk.CTkFrame(dlg, fg_color="transparent")
-        btns.pack(fill="x", padx=20, pady=(0, 18))
+        btns.pack(fill="x", padx=20, pady=(0, 16))
         btns.grid_columnconfigure(0, weight=1)
 
         ctk.CTkButton(
-            btns, text="取消", width=100, height=36, command=no,
-            fg_color=("#334155", "#1E293B"), hover_color=("#475569", "#334155"),
+            btns, text="取消", width=90, height=32, command=no,
+            fg_color=C_BG_RAISED, hover_color=C_BORDER,
+            font=ctk.CTkFont(size=11),
         ).grid(row=0, column=1, padx=(8, 0))
 
         ctk.CTkButton(
-            btns, text="开始安装", width=140, height=36, command=yes,
-            fg_color=COLOR_ACCENT, hover_color=COLOR_ACCENT_HOVER,
-            font=ctk.CTkFont(size=13, weight="bold"),
+            btns, text="开始安装", width=120, height=32, command=yes,
+            fg_color=C_ACCENT, hover_color=C_ACCENT_HOVER,
+            font=ctk.CTkFont(size=12, weight="bold"),
         ).grid(row=0, column=2, padx=(8, 0))
 
         dlg.protocol("WM_DELETE_WINDOW", no)
+        dlg.bind("<Escape>", lambda e: no())
         self.wait_window(dlg)
         return result["ok"]
 
